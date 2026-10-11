@@ -1,0 +1,5 @@
+node_modules/
+*.bak
+*.before-*
+backup-thunderbird/
+node_modules/

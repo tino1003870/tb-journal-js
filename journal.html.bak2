@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="de">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>TB Journal</title>
+
+  <link rel="stylesheet" href="journal.css">
+</head>
+
+<body>
+
+<header class="toolbar">
+
+  <div class="title">
+    <strong>TB Journal</strong>
+    <span>CalDAV VJOURNAL</span>
+  </div>
+
+</header>
+
+
+<main>
+
+  <section class="connection">
+
+    <h2>CalDAV-Verbindung</h2>
+
+    <label>
+      CalDAV-URL
+      <input
+        id="caldavUrl"
+        type="url"
+value="https://caldav.web.de/begenda/dav/bofhdd@web.de/calendar"
+        placeholder="https://server.example/dav/">
+    </label>
+
+    <label>
+      Benutzername
+      <input
+        id="caldavUsername"
+	value="bofhdd@web.de"
+        type="text">
+    </label>
+
+    <label>
+      Passwort
+      <input
+        id="caldavPassword"
+        type="password">
+    </label>
+
+    <div class="actions">
+
+      <button
+        id="testConnectionButton"
+        type="button">
+        Verbindung testen
+      </button>
+
+      <button
+        id="createVJournalButton"
+        type="button">
+        Test-VJOURNAL anlegen
+      </button>
+
+    </div>
+
+    <pre id="connectionResult"></pre>
+
+  </section>
+
+
+  <section id="journalList">
+
+    <p>Noch keine Journale geladen.</p>
+
+  </section>
+
+</main>
+
+
+<script type="module" src="journal.js"></script>
+
+</body>
+</html>
