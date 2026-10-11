@@ -476,3 +476,41 @@ button:disabled {
     }
 }
 
+
+
+/* CalDAV debug panel */
+.debug-panel {
+  margin-top: 1rem;
+  border: 1px solid #aaa;
+  border-radius: 6px;
+  background: #f4f4f4;
+}
+
+.debug-panel summary {
+  cursor: pointer;
+  padding: .6rem;
+  font-weight: 600;
+}
+
+.debug-actions {
+  padding: 0 .6rem .4rem;
+}
+
+.debug-log {
+  margin: 0;
+  padding: .75rem;
+  max-height: 28rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.4 monospace;
+  background: #202124;
+  color: #f1f3f4;
+}
+
+
+/* Local backup/restore actions */
+#serverToLocalButton,
+#localToServerButton {
+    font-size: 12px;
+}

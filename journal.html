@@ -8,6 +8,48 @@
   <title>TB Journal</title>
 
   <link rel="stylesheet" href="journal.css">
+<style>
+.sync-status-panel {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  background: #fafafa;
+}
+.sync-status-panel h3 { margin: 0 0 8px; font-size: 1.05rem; }
+.sync-status-panel p { margin: 6px 0 10px; }
+.sync-status-group { margin: 8px 0; }
+.sync-status-group strong { display: block; margin-bottom: 4px; }
+.sync-status-list { margin: 0; padding-left: 20px; overflow-wrap: anywhere; }
+.sync-badge {
+  display: inline-block;
+  margin: 4px 0 0 6px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: .78rem;
+  background: #e8e8e8;
+}
+.sync-badge.both { background: #d8f0dc; }
+.sync-badge.server-only { background: #fff0cf; }
+.sync-badge.local-only { background: #dceaff; }
+
+.connection-details {
+  margin: 12px 14px 18px;
+  border: 1px solid #ccc;
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+.connection-details > summary {
+  padding: 13px 16px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style-position: inside;
+  background: #f0f0f0;
+}
+.connection-details-content { padding: 10px; }
+
+</style>
 </head>
 
 <body>
@@ -24,7 +66,10 @@
 
 <main>
 
-  <section class="connection">
+  <details id="connectionDetails" class="connection-details">
+<summary>CalDAV-Verbindung und Einstellungen</summary>
+<div class="connection-details-content">
+<section class="connection">
 
     <h2>CalDAV-Verbindung</h2>
 
@@ -86,11 +131,35 @@ value="https://caldav.web.de/begenda/dav/bofhdd@web.de/calendar"
         </button>
       </div>
 
+      <div class="action-group">
+        <span class="action-group-title">Lokale Sicherung</span>
+        <button id="serverToLocalButton" type="button">Server → lokal sichern</button>
+        <button id="localToServerButton" type="button">Lokal → Server wiederherstellen</button>
+      </div>
+
     </div>
+
+    <section id="syncStatusPanel" class="sync-status-panel" aria-live="polite">
+      <h3>Abgleich lokal / Server</h3>
+      <p id="syncStatusSummary">Status wird nach dem Laden der Journale angezeigt.</p>
+      <div id="syncStatusDetails"></div>
+    </section>
 
     <pre id="connectionResult"></pre>
 
+    <details class="debug-panel">
+      <summary>CalDAV Debug</summary>
+      <div class="debug-actions">
+        <button id="clearDebugButton" type="button">Debug löschen</button>
+      </div>
+      <pre id="debugLog" class="debug-log"></pre>
+    </details>
+
   </section>
+</div>
+</details>
+
+
 
 
 
@@ -142,6 +211,13 @@ value="https://caldav.web.de/begenda/dav/bofhdd@web.de/calendar"
       </button>
 
       <button
+        id="deleteJournalButton"
+        type="button"
+        hidden>
+        Löschen
+      </button>
+
+      <button
         id="cancelJournalButton"
         type="button">
         Abbrechen
@@ -161,6 +237,7 @@ value="https://caldav.web.de/begenda/dav/bofhdd@web.de/calendar"
 </main>
 
 
+<script src="boot-debug.js"></script>
 <script type="module" src="journal.js"></script>
 <script src="journal-ui.js"></script>
 

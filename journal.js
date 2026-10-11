@@ -7,13 +7,45 @@ const $ = id =>
     document.getElementById(id);
 
 
-function log(...args) {
+function debugLog(...args) {
 
     console.log(
         "[TB-JOURNAL]",
         ...args
     );
+
+    const element = document.getElementById("debugLog");
+
+    if (!element) {
+        return;
+    }
+
+    const timestamp =
+        new Date().toLocaleTimeString();
+
+    const text = args.map(value => {
+        if (typeof value === "string") {
+            return value;
+        }
+
+        try {
+            return JSON.stringify(value, null, 2);
+        } catch (_) {
+            return String(value);
+        }
+    }).join(" ");
+
+    element.textContent +=
+        `[${timestamp}] ${text}\n`;
+
+    element.scrollTop = element.scrollHeight;
 }
+
+function log(...args) {
+    debugLog(...args);
+}
+
+window.tbJournalDebugLog = debugLog;
 
 
 async function createTestVJournal() {
@@ -345,134 +377,38 @@ async function listVJournals() {
     }
 
     log(
-        "=== ALLE VJOURNALS LADEN ==="
+        "=== ALLE VJOURNALS LADEN (REPORT) ==="
     );
+
+    showResult("Journale werden vom CalDAV-Server geladen ...");
 
     try {
 
         const result =
             await executeCalDavRequest({
-
-                operation: "PROPFIND",
-
+                operation: "REPORT",
                 url: baseUrl,
-
                 username,
-
                 password
             });
 
         log(
-            "PROPFIND Ergebnis:",
+            "REPORT Ergebnis:",
             result
         );
 
         if (!result.ok) {
-
             throw new Error(
-                `PROPFIND fehlgeschlagen: HTTP ${result.status}`
+                `REPORT fehlgeschlagen: HTTP ${result.status} ${result.statusText}`
             );
         }
 
-        const xml =
-            new DOMParser()
-                .parseFromString(
-                    result.body,
-                    "application/xml"
-                );
-
-        const hrefNodes =
-            [
-                ...xml.getElementsByTagNameNS(
-                    "DAV:",
-                    "href"
-                )
-            ];
-
-        const hrefs =
-            hrefNodes
-                .map(
-                    node =>
-                        node.textContent.trim()
-                )
-                .filter(
-                    href =>
-                        href.endsWith(".ics")
-                );
-
-        log(
-            "ICS-Ressourcen:",
-            hrefs
-        );
-
-        const journals = [];
-
-        for (const href of hrefs) {
-
-            const url =
-                new URL(
-                    href,
-                    baseUrl
-                ).href;
-
-            try {
-
-                const item =
-                    await executeCalDavRequest({
-
-                        operation: "GET",
-
-                        url,
-
-                        username,
-
-                        password
-                    });
-
-                if (
-                    !item.ok ||
-                    !item.body
-                ) {
-                    continue;
-                }
-
-                if (
-                    !item.body.includes(
-                        "BEGIN:VJOURNAL"
-                    )
-                ) {
-                    continue;
-                }
-
-                const journal =
-                    parseVJournal(
-                        item.body
-                    );
-
-                journal.url =
-                    url;
-
-                journal.ical =
-                    item.body;
-
-                journals.push(
-                    journal
-                );
-
-                log(
-                    "VJOURNAL gefunden:",
-                    journal
-                );
-
-            } catch (error) {
-
-                console.error(
-                    "[TB-JOURNAL] Fehler beim Lesen:",
-                    url,
-                    error
-                );
-            }
-        }
+        const journals = (result.todos || []).map(journal => ({
+            ...journal,
+            url: journal.href
+                ? new URL(journal.href, baseUrl).href
+                : ""
+        }));
 
         log(
             "=== VJOURNALS GESAMT ===",
@@ -489,10 +425,10 @@ async function listVJournals() {
         );
 
         showResult(
-            `Fehler: ${error.message}`
+            `Fehler beim Laden der Journale: ${error.message}`
         );
 
-        return [];
+        return null;
     }
 }
 
@@ -514,6 +450,8 @@ function sortJournalsByDate(journals) {
 
 
 function displayJournals(journals) {
+
+    latestServerJournals = journals;
 
     const container =
         $("journalList");
@@ -540,6 +478,10 @@ function displayJournals(journals) {
 
             article.className =
                 "journal-entry";
+            article.dataset.syncKey = journalIdentity(
+                journal,
+                $("caldavUrl").value.trim().replace(/\/+$/, "")
+            );
 
 
             const title =
@@ -621,6 +563,8 @@ async function loadVJournals() {
     const journals =
         await listVJournals();
 
+    if (!Array.isArray(journals)) return;
+
     displayJournals(
         journals
     );
@@ -628,6 +572,270 @@ async function loadVJournals() {
     showResult(
         `${journals.length} VJOURNAL-Einträge geladen.`
     );
+    await refreshSyncStatus(journals);
+}
+
+
+/*
+ * ------------------------------------------------------------
+ * Lokale Sicherung und Wiederherstellung
+ * ------------------------------------------------------------
+ */
+
+
+const LOCAL_JOURNAL_BACKUP_KEY = "tbJournalLocalBackup";
+let latestServerJournals = [];
+
+function journalResourceUrl(journal, baseUrl) {
+    const raw = journal.url || (journal.href ? new URL(journal.href, baseUrl).href : "");
+    if (!raw) return "";
+    try {
+        return new URL(raw, baseUrl).href;
+    } catch (_) {
+        return raw;
+    }
+}
+
+function journalIdentity(journal, baseUrl) {
+    return journalResourceUrl(journal, baseUrl) || (journal.uid ? `uid:${journal.uid}` : "");
+}
+
+function createSyncBadge(text, kind) {
+    const badge = document.createElement("span");
+    badge.className = `sync-badge ${kind || ""}`;
+    badge.textContent = text;
+    return badge;
+}
+
+async function refreshSyncStatus(serverJournals = latestServerJournals) {
+    const summary = $("syncStatusSummary");
+    const details = $("syncStatusDetails");
+    if (!summary || !details) return;
+
+    const baseUrl = $("caldavUrl").value.trim().replace(/\/+$/, "");
+    const stored = await browser.storage.local.get(LOCAL_JOURNAL_BACKUP_KEY);
+    const backup = stored[LOCAL_JOURNAL_BACKUP_KEY];
+
+    details.replaceChildren();
+
+    if (!Array.isArray(serverJournals)) {
+        summary.textContent = "Serverstatus unbekannt. Bitte Journale laden.";
+        return;
+    }
+
+    if (!backup || !Array.isArray(backup.journals)) {
+        summary.textContent = `Server: ${serverJournals.length} Journale. Noch keine lokale Sicherung vorhanden.`;
+        const p = document.createElement("p");
+        p.textContent = "Mit „Server → lokal sichern“ wird ein Vergleichsstand erstellt.";
+        details.appendChild(p);
+        renderJournalStatusBadges(serverJournals, new Set(), false, baseUrl);
+        return;
+    }
+
+    if (backup.collectionUrl !== baseUrl) {
+        summary.textContent = `Server: ${serverJournals.length} Journale. Die lokale Sicherung gehört zu einer anderen Collection.`;
+        const p = document.createElement("p");
+        p.textContent = `Lokale Sicherung: ${backup.collectionUrl}`;
+        details.appendChild(p);
+        renderJournalStatusBadges(serverJournals, new Set(), false, baseUrl);
+        return;
+    }
+
+    const localMap = new Map();
+    for (const journal of backup.journals) {
+        const key = journalIdentity(journal, baseUrl);
+        if (key) localMap.set(key, journal);
+    }
+    const serverMap = new Map();
+    for (const journal of serverJournals) {
+        const key = journalIdentity(journal, baseUrl);
+        if (key) serverMap.set(key, journal);
+    }
+
+    const both = [];
+    const localOnly = [];
+    const serverOnly = [];
+
+    for (const [key, journal] of localMap) {
+        if (serverMap.has(key)) both.push(journal);
+        else localOnly.push(journal);
+    }
+    for (const [key, journal] of serverMap) {
+        if (!localMap.has(key)) serverOnly.push(journal);
+    }
+
+    summary.textContent =
+        `Letzte lokale Sicherung: ${new Date(backup.savedAt).toLocaleString()} — ` +
+        `Lokal: ${localMap.size}, Server: ${serverMap.size}, beides: ${both.length}, ` +
+        `nur lokal: ${localOnly.length}, nur Server: ${serverOnly.length}.`;
+
+    const addGroup = (title, entries, className) => {
+        const group = document.createElement("div");
+        group.className = "sync-status-group";
+        const heading = document.createElement("strong");
+        heading.textContent = `${title} (${entries.length})`;
+        group.appendChild(heading);
+        if (entries.length) {
+            const list = document.createElement("ul");
+            list.className = "sync-status-list";
+            for (const journal of entries) {
+                const li = document.createElement("li");
+                li.textContent = journal.summary || journal.uid || "(ohne Titel)";
+                list.appendChild(li);
+            }
+            group.appendChild(list);
+        }
+        details.appendChild(group);
+    };
+
+    addGroup("Lokal und auf dem Server", both, "both");
+    addGroup("Nur lokal vorhanden", localOnly, "local-only");
+    addGroup("Nur auf dem Server vorhanden", serverOnly, "server-only");
+
+    renderJournalStatusBadges(serverJournals, new Set(localMap.keys()), true, baseUrl);
+}
+
+function renderJournalStatusBadges(journals, localKeys, comparable, baseUrl) {
+    // The cards are rendered by displayJournals; append a status badge to each current card.
+    const cards = Array.from(document.querySelectorAll("#journalList .journal-entry"));
+    for (const card of cards) {
+        const key = card.dataset.syncKey || "";
+        const old = card.querySelector(".sync-badge");
+        if (old) old.remove();
+        if (!comparable) {
+            card.appendChild(createSyncBadge("Serverstand", "server-only"));
+        } else if (key && localKeys.has(key)) {
+            card.appendChild(createSyncBadge("Lokal + Server", "both"));
+        } else {
+            card.appendChild(createSyncBadge("Nur Server", "server-only"));
+        }
+    }
+}
+
+
+function getCurrentConnection() {
+    return {
+        baseUrl: $("caldavUrl").value.trim().replace(/\/+$/, ""),
+        username: $("caldavUsername").value,
+        password: $("caldavPassword").value
+    };
+}
+
+async function serverToLocal() {
+    const { baseUrl } = getCurrentConnection();
+    if (!baseUrl) {
+        showResult("Bitte zuerst eine CalDAV-URL eingeben.");
+        return;
+    }
+
+    log("=== SERVER → LOKALE SICHERUNG ===");
+    const journals = await listVJournals();
+    if (!Array.isArray(journals)) {
+        showResult("Serverdaten konnten nicht geladen werden; lokale Sicherung wurde nicht verändert.");
+        return;
+    }
+
+    const backup = {
+        collectionUrl: baseUrl,
+        savedAt: new Date().toISOString(),
+        journals
+    };
+
+    await browser.storage.local.set({
+        [LOCAL_JOURNAL_BACKUP_KEY]: backup
+    });
+
+    log("Lokale Sicherung gespeichert:", {
+        collectionUrl: backup.collectionUrl,
+        count: journals.length,
+        savedAt: backup.savedAt
+    });
+    latestServerJournals = journals;
+    displayJournals(journals);
+    await refreshSyncStatus(journals);
+    showResult(`${journals.length} Journale lokal gesichert (${new Date(backup.savedAt).toLocaleString()}).`);
+}
+
+async function localToServer() {
+    const { baseUrl, username, password } = getCurrentConnection();
+    if (!baseUrl) {
+        showResult("Bitte zuerst eine CalDAV-URL eingeben.");
+        return;
+    }
+
+    const stored = await browser.storage.local.get(LOCAL_JOURNAL_BACKUP_KEY);
+    const backup = stored[LOCAL_JOURNAL_BACKUP_KEY];
+    if (!backup || !Array.isArray(backup.journals)) {
+        showResult("Keine lokale Journal-Sicherung vorhanden. Bitte zuerst ‚Server → lokal sichern‘ ausführen.");
+        return;
+    }
+
+    if (backup.collectionUrl !== baseUrl) {
+        showResult("Die Sicherung gehört zu einer anderen CalDAV-Collection. Wiederherstellung abgebrochen.");
+        return;
+    }
+
+    const localJournals = backup.journals;
+    const localUrls = new Set(localJournals.map(j => j.url || (j.href ? new URL(j.href, baseUrl).href : "")).filter(Boolean));
+    const preview = `Lokale Sicherung vom ${new Date(backup.savedAt).toLocaleString()} enthält ${localJournals.length} Journale.\n\nDie aktuelle Server-Collection wird an diese Sicherung angepasst. Servereinträge, die nicht in der Sicherung enthalten sind, werden gelöscht. Fortfahren?`;
+    if (!confirm(preview)) return;
+
+    log("=== LOKALE SICHERUNG → SERVER WIEDERHERSTELLEN ===");
+    log("Sicherungsdatum:", backup.savedAt);
+    log("Lokale Journale:", localJournals.length);
+
+    try {
+        const serverJournals = await listVJournals();
+        if (!Array.isArray(serverJournals)) throw new Error("Aktuelle Serverdaten konnten nicht gelesen werden; es wurde nichts überschrieben.");
+        const serverByUrl = new Map(serverJournals.map(j => [j.url || (j.href ? new URL(j.href, baseUrl).href : ""), j]));
+
+        // Validate every destination before writing anything.
+        for (const journal of localJournals) {
+            const url = journal.url || (journal.href ? new URL(journal.href, baseUrl).href : "");
+            if (!url || new URL(url).origin !== new URL(baseUrl).origin || !new URL(url).pathname.endsWith(".ics")) {
+                throw new Error(`Ungültige oder fremde Journal-URL: ${url || "(leer)"}`);
+            }
+            if (!journal.calendarData) {
+                throw new Error(`Für „${journal.summary || journal.uid || "Journal"}“ fehlt der vollständige iCalendar-Inhalt. Bitte eine neue lokale Sicherung erstellen.`);
+            }
+        }
+
+        let restored = 0;
+        for (const journal of localJournals) {
+            const url = journal.url || new URL(journal.href, baseUrl).href;
+            const result = await executeCalDavRequest({
+                operation: "PUT",
+                url,
+                username,
+                password,
+                body: journal.calendarData
+            });
+            if (!result.ok) throw new Error(`PUT ${url}: HTTP ${result.status} ${result.statusText}`);
+            restored++;
+            log("Wiederhergestellt:", url);
+        }
+
+        let deleted = 0;
+        for (const [url, journal] of serverByUrl) {
+            if (!url || localUrls.has(url)) continue;
+            const result = await executeCalDavRequest({
+                operation: "DELETE",
+                url,
+                username,
+                password,
+                etag: journal.etag || null
+            });
+            if (!result.ok) throw new Error(`DELETE ${url}: HTTP ${result.status} ${result.statusText}`);
+            deleted++;
+            log("Servereintrag entfernt (nicht in lokaler Sicherung):", url);
+        }
+
+        showResult(`Wiederherstellung abgeschlossen: ${restored} Journale geschrieben, ${deleted} zusätzliche Servereinträge gelöscht.`);
+        await loadVJournals();
+    } catch (error) {
+        log("WIEDERHERSTELLUNGSFEHLER:", error.message || String(error));
+        showResult(`Wiederherstellung nicht vollständig: ${error.message}. Bitte Server und lokale Sicherung prüfen; bereits ausgeführte Änderungen werden nicht automatisch zurückgerollt.`);
+    }
 }
 
 
@@ -655,11 +863,17 @@ function openJournalEditor(journal = null) {
     const date =
         $("journalDate");
 
+    const deleteButton =
+        $("deleteJournalButton");
+
 
     if (journal) {
 
         heading.textContent =
             "Journal bearbeiten";
+
+        deleteButton.hidden =
+            false;
 
         title.value =
             journal.summary || "";
@@ -674,6 +888,9 @@ function openJournalEditor(journal = null) {
 
         heading.textContent =
             "Neues Journal";
+
+        deleteButton.hidden =
+            true;
 
         title.value =
             "";
@@ -774,6 +991,97 @@ DTSTART;VALUE=DATE:${dtstart}
 END:VJOURNAL
 END:VCALENDAR
 `;
+}
+
+
+async function deleteJournal() {
+
+    if (!editingJournal) {
+        return;
+    }
+
+    const title =
+        editingJournal.summary ||
+        "dieses Journal";
+
+    const confirmed =
+        confirm(`Journal "${title}" wirklich löschen?`);
+
+    if (!confirmed) {
+        return;
+    }
+
+    const baseUrl =
+        $("caldavUrl")
+            .value
+            .trim();
+
+    const username =
+        $("caldavUsername")
+            .value;
+
+    const password =
+        $("caldavPassword")
+            .value;
+
+    const url =
+        editingJournal.url ||
+        (editingJournal.href
+            ? new URL(editingJournal.href, baseUrl).href
+            : "");
+
+    if (!url) {
+        showResult(
+            "Keine URL für das Journal gefunden."
+        );
+        return;
+    }
+
+    log("=== VJOURNAL LÖSCHEN ===");
+    log("URL:", url);
+    log("ETag:", editingJournal.etag || "(kein ETag)");
+
+    try {
+
+        const result =
+            await executeCalDavRequest({
+                operation: "DELETE",
+                url,
+                username,
+                password,
+                etag: editingJournal.etag || null
+            });
+
+        log(
+            "VJOURNAL DELETE Ergebnis:",
+            result
+        );
+
+        if (!result.ok) {
+            throw new Error(
+                `HTTP ${result.status} ${result.statusText}`
+            );
+        }
+
+        closeJournalEditor();
+
+        showResult(
+            "Journal gelöscht."
+        );
+
+        await loadVJournals();
+
+    } catch (error) {
+
+        console.error(
+            "[TB-JOURNAL] VJOURNAL DELETE ERROR",
+            error
+        );
+
+        showResult(
+            `Fehler beim Löschen: ${error.message}`
+        );
+    }
 }
 
 
@@ -954,7 +1262,7 @@ async function saveJournal() {
  * ------------------------------------------------------------
  */
 
-function saveSettings() {
+async function saveSettings() {
 
     const settings = {
         caldavUrl: $("caldavUrl").value.trim(),
@@ -962,35 +1270,30 @@ function saveSettings() {
         password: $("caldavPassword").value
     };
 
-    localStorage.setItem(
-        "tbJournalSettings",
-        JSON.stringify(settings)
-    );
+    await browser.storage.local.set({
+        tbJournalSettings: settings
+    });
 
     showResult("Einstellungen gespeichert.");
-
     log("Einstellungen gespeichert.");
 }
 
 
-function loadSettings() {
-
-    const raw =
-        localStorage.getItem("tbJournalSettings");
-
-    if (!raw) {
-
-        showResult(
-            "Keine gespeicherten Einstellungen gefunden."
-        );
-
-        return;
-    }
+async function loadSettings() {
 
     try {
+        const stored =
+            await browser.storage.local.get("tbJournalSettings");
 
         const settings =
-            JSON.parse(raw);
+            stored.tbJournalSettings;
+
+        if (!settings) {
+            showResult(
+                "Keine gespeicherten Einstellungen gefunden."
+            );
+            return;
+        }
 
         $("caldavUrl").value =
             settings.caldavUrl || "";
@@ -1008,7 +1311,6 @@ function loadSettings() {
         log("Einstellungen geladen.");
 
     } catch (error) {
-
         console.error(
             "[TB-JOURNAL] SETTINGS ERROR",
             error
@@ -1111,14 +1413,14 @@ async function testConnection() {
 $("loadSettingsButton")
     .addEventListener(
         "click",
-        loadSettings
+        () => loadSettings()
     );
 
 
 $("saveSettingsButton")
     .addEventListener(
         "click",
-        saveSettings
+        () => saveSettings()
     );
 
 
@@ -1158,16 +1460,38 @@ $("saveJournalButton")
     );
 
 
+$("deleteJournalButton")
+    .addEventListener(
+        "click",
+        deleteJournal
+    );
+
+
 $("cancelJournalButton")
     .addEventListener(
         "click",
         closeJournalEditor
     );
 
+$("serverToLocalButton")
+    ?.addEventListener("click", serverToLocal);
+
+$("localToServerButton")
+    ?.addEventListener("click", localToServer);
 
 
-log(
-    "TB Journal Electron geladen."
+$("clearDebugButton")
+    ?.addEventListener(
+        "click",
+        () => {
+            $("debugLog").textContent = "";
+            debugLog("Debug-Protokoll gelöscht.");
+        }
+    );
+
+
+debugLog(
+    "journal.js gestartet (TB Journal Firefox 0.1.7)."
 );
 
 window.setJournalSortOrder = function(order) {
@@ -1184,3 +1508,13 @@ window.setJournalSortOrder = function(order) {
 
     loadVJournals();
 };
+
+
+/*
+ * Restore the last CalDAV connection settings first.
+ * Only then start the initial CalDAV load.
+ */
+(async () => {
+    await loadSettings();
+    await loadVJournals();
+})();

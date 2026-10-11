@@ -1,3 +1,16 @@
+function debug(...args) {
+    try {
+        if (typeof window !== "undefined" &&
+            typeof window.tbJournalDebugLog === "function") {
+            window.tbJournalDebugLog(...args);
+        } else {
+            console.log("[TB-JOURNAL-CALDAV]", ...args);
+        }
+    } catch (_) {
+        console.log("[TB-JOURNAL-CALDAV]", ...args);
+    }
+}
+
 export async function executeCalDavRequest({
     operation,
     url,
@@ -7,6 +20,11 @@ export async function executeCalDavRequest({
     etag = null
 }) {
     const headers = {};
+
+    debug("--- CalDAV Request ---");
+    debug("Method:", operation);
+    debug("URL:", url);
+    debug("Username:", username || "(leer)");
 
     if (username || password) {
         const credentials = `${username}:${password}`;
@@ -28,7 +46,16 @@ export async function executeCalDavRequest({
     if (operation === "PUT") {
         options.headers["Content-Type"] =
             "text/calendar; charset=utf-8";
-options.body = body || "";
+        options.body = body || "";
+    }
+
+    if (operation === "DELETE") {
+        // DELETE does not require a request body.
+        // If the server provides an ETag, use it to avoid
+        // accidentally deleting a resource that changed meanwhile.
+        if (etag) {
+            options.headers["If-Match"] = etag;
+        }
     }
 
     if (operation === "PROPFIND") {
@@ -70,65 +97,86 @@ options.body = body || "";
     }
 
     /*
-     * Electron transport:
-     * HTTP requests are executed in the Electron main process
-     * to avoid browser CORS restrictions.
+     * Firefox/WebExtension transport:
+     * Extension host permissions allow direct requests to the
+     * user-configured CalDAV server.
      */
-    if (
-        typeof window === "undefined" ||
-        !window.electronAPI ||
-        typeof window.electronAPI.caldavRequest !== "function"
-    ) {
-        throw new Error(
-            "Electron CalDAV transport is not available."
-        );
+    let response;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+
+    debug("Request body length:", options.body ? options.body.length : 0);
+    if (operation === "REPORT" || operation === "PROPFIND") {
+        debug("Request body:", options.body || "(leer)");
     }
 
-    const result =
-        await window.electronAPI.caldavRequest({
+    try {
+        response = await fetch(url, {
+            method: operation,
+            headers: options.headers,
+            body: options.body ?? undefined,
+            signal: controller.signal
+        });
+    } catch (error) {
+        if (error?.name === "AbortError") {
+            debug("FETCH TIMEOUT nach 20 Sekunden");
+            throw new Error(`CalDAV request timed out after 20 seconds: ${operation} ${url}`);
+        }
+        debug("FETCH ERROR:", error?.name || "Error", error?.message || String(error));
+        throw new Error(`CalDAV request failed: ${error.message}`);
+    } finally {
+        clearTimeout(timeout);
+    }
+
+    debug("HTTP Status:", response.status, response.statusText);
+    debug("Response Content-Type:", response.headers.get("content-type") || "(nicht vorhanden)");
+
+    const responseBody = await response.text();
+
+    debug("Response length:", responseBody.length, "Bytes/Zeichen");
+    if (responseBody) {
+        debug("Response preview (max. 5000 Zeichen):\n" + responseBody.slice(0, 5000));
+    } else {
+        debug("Response body: (leer)");
+    }
+
+    const result = {
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        body: responseBody,
+        requestDebug: {
             operation,
             url,
             username,
-            password,
-            headers: options.headers,
-            body: options.body ?? null
-        });
-
-    /*
-     * Debug information about the actual request.
-     * Never expose the password or Authorization header.
-     */
-    result.requestDebug = {
-        operation,
-        url,
-        username,
-        headers: {
-            ...options.headers,
-            Authorization: options.headers.Authorization
-                ? "[hidden]"
-                : undefined
-        },
-        bodyLength: options.body
-            ? options.body.length
-            : 0,
-        body: options.body || ""
+            headers: {
+                ...options.headers,
+                Authorization: options.headers.Authorization
+                    ? "[hidden]"
+                    : undefined
+            },
+            bodyLength: options.body ? options.body.length : 0,
+            body: options.body || ""
+        }
     };
 
-    const responseBody =
-        result.body || "";
-
-    /*
-     * REPORT:
-     * Parse the CalDAV multistatus response.
-     */
-    if (operation === "REPORT" && result.status >= 200 && result.status < 300) {
-        result.todos =
-            parseCalDavReport(responseBody);
+    if (
+        operation === "REPORT" &&
+        response.ok
+    ) {
+        try {
+            result.todos = parseCalDavReport(responseBody);
+            debug("REPORT parsed successfully. VJOURNAL count:", result.todos.length);
+        } catch (error) {
+            debug("REPORT PARSE ERROR:", error?.message || String(error));
+            throw error;
+        }
     }
 
+    debug("--- CalDAV Request Ende ---");
     return result;
 }
-
 
 /**
  * Parse a CalDAV REPORT multistatus response.
@@ -192,6 +240,9 @@ function parseCalDavReport(xmlText) {
         if (!todo) {
             continue;
         }
+
+        // Keep the complete iCalendar resource for lossless local backup/restore.
+        todo.calendarData = calendarData;
 
         todo.href =
             hrefElement?.textContent || "";
